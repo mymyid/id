@@ -15,19 +15,38 @@
         let localStream;
         let peerConnection;
 
-        const ws = new WebSocket('ws://localhost:8080/webrtc'); // Updated endpoint
+        const ws = new WebSocket('wss://wss.do.my.id/webrtc');
+        let isRemoteDescriptionSet = false;
 
         ws.onmessage = async (event) => {
             const message = JSON.parse(event.data);
+
             if (message.sdp) {
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(message));
-                if (message.type === 'offer') {
-                    const answer = await peerConnection.createAnswer();
-                    await peerConnection.setLocalDescription(answer);
-                    ws.send(JSON.stringify(peerConnection.localDescription));
+                const sdpType = message.sdp.type;
+                const sdpContent = message.sdp.sdp;
+
+                if (sdpType && sdpContent) {
+                    const remoteDesc = new RTCSessionDescription({
+                        type: sdpType,
+                        sdp: sdpContent
+                    });
+                    
+                    await peerConnection.setRemoteDescription(remoteDesc);
+                    isRemoteDescriptionSet = true;
+
+                    if (remoteDesc.type === 'offer') {
+                        const answer = await peerConnection.createAnswer();
+                        await peerConnection.setLocalDescription(answer);
+                        ws.send(JSON.stringify({ sdp: peerConnection.localDescription }));
+                    }
                 }
-            } else if (message.candidate) {
-                await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+            } else if (message.candidate && isRemoteDescriptionSet) {
+                const candidate = parseIceCandidate(message.candidate);
+                if (candidate) {
+                    await peerConnection.addIceCandidate(candidate);
+                } else {
+                    console.error('Invalid ICE candidate:', message.candidate);
+                }
             }
         };
 
@@ -52,73 +71,35 @@
 
             const offer = await peerConnection.createOffer();
             await peerConnection.setLocalDescription(offer);
-            ws.send(JSON.stringify(peerConnection.localDescription));
+            ws.send(JSON.stringify({ sdp: peerConnection.localDescription }));
         }
 
         start();
 
-        // Utility function to prefer VP9 codec
-        function preferVP9(sdp) {
-            let sdpLines = sdp.split('\r\n');
-            let mLineIndex = null;
 
-            // Search for m=video line
-            for (let i = 0; i < sdpLines.length; i++) {
-                if (sdpLines[i].indexOf('m=video') === 0) {
-                    mLineIndex = i;
-                    break;
-                }
+        function parseIceCandidate(candidateData) {
+            // Split the candidate data into tokens
+            const tokens = candidateData.split(' ');
+
+            // Extract relevant fields
+            const candidate = tokens[0];
+            const sdpMLineIndex = tokens[1];
+            const sdpMid = tokens[2];
+
+            // Check if all required fields are present
+            if (candidate && sdpMLineIndex && sdpMid) {
+                // Construct an RTCIceCandidate object with the available information
+                return new RTCIceCandidate({
+                    candidate: candidate,
+                    sdpMLineIndex: parseInt(sdpMLineIndex),
+                    sdpMid: sdpMid
+                });
+            } else {
+                // Log an error message and return null for an invalid ICE candidate
+                console.error('Invalid ICE candidate:', candidateData);
+                return null;
             }
-
-            if (mLineIndex === null) {
-                return sdp;
-            }
-
-            // Search for VP9 payload type
-            let vp9Payload = null;
-            for (let i = 0; i < sdpLines.length; i++) {
-                if (sdpLines[i].indexOf('VP9/90000') !== -1) {
-                    vp9Payload = sdpLines[i].split(' ')[0].split(':')[1];
-                    break;
-                }
-            }
-
-            if (vp9Payload === null) {
-                return sdp;
-            }
-
-            // Modify m=video line to prefer VP9
-            let mLineElements = sdpLines[mLineIndex].split(' ');
-            let newMLine = [];
-            for (let i = 0; i < mLineElements.length; i++) {
-                if (i === 3) {
-                    newMLine.push(vp9Payload);
-                }
-                if (mLineElements[i] !== vp9Payload) {
-                    newMLine.push(mLineElements[i]);
-                }
-            }
-            sdpLines[mLineIndex] = newMLine.join(' ');
-
-            return sdpLines.join('\r\n');
         }
-
-        // Override createOffer and createAnswer to prefer VP9
-        const origCreateOffer = RTCPeerConnection.prototype.createOffer;
-        RTCPeerConnection.prototype.createOffer = function(...args) {
-            return origCreateOffer.apply(this, args).then(desc => {
-                desc.sdp = preferVP9(desc.sdp);
-                return desc;
-            });
-        };
-
-        const origCreateAnswer = RTCPeerConnection.prototype.createAnswer;
-        RTCPeerConnection.prototype.createAnswer = function(...args) {
-            return origCreateAnswer.apply(this, args).then(desc => {
-                desc.sdp = preferVP9(desc.sdp);
-                return desc;
-            });
-        };
     </script>
 </body>
 </html>
